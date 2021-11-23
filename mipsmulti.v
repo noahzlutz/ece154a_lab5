@@ -38,7 +38,7 @@ module controller(input       clk, reset,
 
 	wire branch; //internal branch wire
 	wire PCWrite; //internal PCWrite wire
-	wire aluop[1:0]; //internal aluop wire
+	wire [1:0] aluop; //internal aluop wire
 
 
 	maindec md(clk, reset, op, memwrite, irwrite, regwrite,alusrca, iord, memtoreg,
@@ -51,11 +51,12 @@ module controller(input       clk, reset,
  
 endmodule
 
-module maindec(	input	clk, reset, //idk if i need the clk
+module maindec(	input	clk, reset, 
 		input[5:0] op,
 		output memwrite, irwrite, regwrite,
                	output alusrca, iord, memtoreg, regdst,
-               	output [1:0] alusrcb, pcsrc, aluop,
+               	output [1:0] alusrcb, pcsrc, 
+		output [1:0] aluop,
 		output branch, PCWrite);
 
 	reg[3:0] current_state, next_state; //hold curretn and next state 0 to 11
@@ -74,11 +75,13 @@ module maindec(	input	clk, reset, //idk if i need the clk
 	parameter JEx = 4'b1011;
 
 	always@  (posedge  clk) begin  //detemrines and gets the next state
-		if(reset == 1'b1)
+		if(reset == 1'b1) begin
 			current_state <= Fetch; //reset to s0 (fetch)
-		else  begin
-			current_state <= next_state; //sets curr state to next
-			
+			//next_state <= Decode;
+		end
+		else current_state <= next_state; //sets curr state to next
+	end
+		always@ (current_state, op) begin
 			case(current_state) //get new next state based on current state
 				default: next_state = Fetch; //->s0 (fetch)
 				Fetch: next_state = Decode; //->s1 (decode)
@@ -107,8 +110,7 @@ module maindec(	input	clk, reset, //idk if i need the clk
 					
 			endcase
 		end
-	end
-
+	
 
 	reg [14:0] controls;
 	assign {PCWrite, memwrite, irwrite, regwrite, alusrca, branch,
@@ -171,7 +173,7 @@ module maindec(	input	clk, reset, //idk if i need the clk
 				alusrcb <= 2'b10;
 				aluop <= 2'b00;
 				end*/
-			AddiWB: controls <= 15'b0001000000000000;/*begin
+			AddiWB: controls <= 15'b000100000000000;/*begin
 				regdst <= 1'b0;
 				memtoreg <= 1'b0;
 				regwrite  <= 1'b1;
@@ -221,39 +223,85 @@ module datapath(input        clk, reset,
 // **PUT YOUR CODE HERE** 
 
 	wire [4:0] writereg;
-    	wire [31:0] pcnext, pcnextbr, pcplus4, pcbranch;
+	wire [31:0] wd3result,pcnext;
+    	wire [31:0] pc;
     	wire [31:0] signimm, signimmsh;
     	wire [31:0] srca, srcb;
-	wire [31:0] regf_rd1, regf_rd2;
+	wire [31:0] regf_rd1, regf_rd2; // from register file ouput
+	wire [31:0] a, b; //a and b from reg file after register
 	
     	wire [31:0] aluresult;
-	
+	wire [31:0] aluout;
+
+	wire [31:0] instr; //instr wire after irwrite reg
+	wire [31:0] data; //data wire after register for wd3
 
 	
+	
+	//PC logic
+	enr #(32) pcreg(clk,reset,pcnext,pcen,pc); //pc register controled by pcen
+	mux2 #(32) iordreg(pc, aluout, iord, adr); //mux that determines adr controlled by iord
+	
+	//instruction logic
+	enr #(32) instrreg(clk,reset,readdata,irwrite,instr); // irwrite enable reg for instr
+	flopr #(32) datareg(clk,reset,readdata,data);
 
+	assign op = instr[31:26];
+	assign funct = instr[5:0];
 
+	signext	se(instr[15:0], signimm); //sign extension
+	sl2 #(32) immsh(signimm, signimmsh); //sign extension shift 2
 
 
 	//reg file logic
-	regfile rf(clk, regwrite, instr[25:21], instr[20:16],
-                writereg, result, srca, writedata); // need to edit writedata
 	mux2 #(5) wrmux(instr[20:16], instr[15:11], //mux for A3 in regfile
-                    regdst, writereg);
-
+                    	regdst, writereg);
+	mux2 #(32) wd3mux(aluout, data, 	//mux for wd3 input to regfile
+			memtoreg, wd3result);
+	regfile rf(clk, regwrite, instr[25:21], instr[20:16],
+                writereg, wd3result, regf_rd1, regf_rd2);
+	
+	flopr #(32) a_reg(clk,reset, regf_rd1, a); //a register control
+	flopr #(32) b_reg(clk,reset, regf_rd2, b); //b register control
+	assign writedata = b;
+	
+	//ALU logic
+	//wire [31:0] fourwire = 1'd4;
+	mux2 #(32) srca_mux(pc,a,alusrca,srca); //mux determine scra
+	mux4 #(32) srcb_mux(b, 32'd4, signimm,signimmsh,alusrcb,srcb); //mux determine scrb
+	ALU        alu(srca, srcb, alucontrol, aluresult, zero); //alu
+	flopr #(32) alureg(clk,reset,aluresult,aluout); //aluresult register
+	
+	//jump logic
+	wire [27:0] endof_pcjump;
+	sl2 #(28) pcjumpshift({2'b00,instr[25:0]}, endof_pcjump); // shift of instr to get end bits of pcjump
+	wire [31:0] nullval = 32'b0;
+	mux4 #(32) threetoonemux(aluresult,aluout,{pc[31:28],endof_pcjump}, nullval,pcsrc, pcnext);
+	
 
 endmodule
 
-module flopr #(parameter WIDTH = 8)
+module flopr #(parameter WIDTH = 8) //registers no enable
                 (input clk, reset,
                 input [WIDTH-1:0] d,
-		input pcen,
                 output reg[WIDTH-1:0] q);
 
     always @(posedge clk, posedge reset)
         if (reset) q <= 0;
         else q <= d;
 
+endmodule
 
+module enr #(parameter WIDTH = 8) //enabled controlled registers 
+                (input clk, reset,
+                input [WIDTH-1:0] d,
+		input en,
+                output reg[WIDTH-1:0] q);
+
+    always @(posedge clk, posedge reset)
+        if (reset) q <= 0;
+        else if(en) q <= d;
+	//else q <= q;
 
 endmodule
 
@@ -272,10 +320,11 @@ module regfile(input  clk, ///regfile pulled from single cycle
 
 endmodule
 
-module sl2(input  [31:0] a, //shift left by 2 module
-            output  [31:0] y);
+module sl2 #(parameter WIDTH = 8)
+		(input  [WIDTH-1:0] a, //shift left by 2 module
+            output  [WIDTH-1:0] y);
     // shift left by 2
-    assign y = {a[29:0], 2'b00};
+    assign y = {a[WIDTH-3:0], 2'b00};
 endmodule
 
 module signext(input  [15:0] a, ///sign extend module
